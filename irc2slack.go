@@ -45,18 +45,14 @@ func connectAndListen(config *Config) error {
     defer conn.Close()
 
     // Sending IRC commands
-    fmt.Fprintf(conn, "NICK %s
-", config.IRC.Nickname)
-    fmt.Fprintf(conn, "USER %s 8 * :%s
-", config.IRC.Nickname, config.IRC.Nickname)
-    fmt.Fprintf(conn, "JOIN %s
-", config.IRC.Channel)
+    fmt.Fprintf(conn, "NICK %s\r\n", config.IRC.Nickname)
+    fmt.Fprintf(conn, "USER %s 8 * :%s\r\n", config.IRC.Nickname, config.IRC.Nickname)
+    fmt.Fprintf(conn, "JOIN %s\r\n", config.IRC.Channel)
 
     // Reading messages
     reader := bufio.NewReader(conn)
     for {
-        message, err := reader.ReadString('
-')
+        message, err := reader.ReadString('\n')
         if err != nil {
             return fmt.Errorf("error reading message: %v", err)
         }
