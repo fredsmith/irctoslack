@@ -1,0 +1,7 @@
+irc:
+  server: "irc.oftc.net:6667"
+  channel: "#rpi"
+  nickname: "rpislacker"
+
+slack:
+  webhook_url: "https://hooks.slack.com/services/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"
