@@ -1,167 +1,383 @@
-
 package main
 
 import (
-    "bufio"
-    "fmt"
-    "gopkg.in/yaml.v2"
-    "io/ioutil"
-    "log"
-    "net"
-    "net/http"
-    "strings"
-    "time"
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"gopkg.in/yaml.v2"
 )
 
 // Config structure to hold the yaml configuration
 type Config struct {
-    IRC struct {
-        Server   string `yaml:"server"`
-        Channel  string `yaml:"channel"`
-        Nickname string `yaml:"nickname"`
-    } `yaml:"irc"`
-    Slack struct {
-        WebhookURL string `yaml:"webhook_url"`
-    } `yaml:"slack"`
+	IRC struct {
+		Server   string `yaml:"server"`
+		Channel  string `yaml:"channel"`
+		Nickname string `yaml:"nickname"`
+	} `yaml:"irc"`
+	Slack struct {
+		WebhookURL    string   `yaml:"webhook_url"`
+		ListenAddress string   `yaml:"listen_address"`
+		APIToken      string   `yaml:"api_token"`
+		IgnoreBots    bool     `yaml:"ignore_bots"`
+		IgnoreUsers   []string `yaml:"ignore_users"`
+	} `yaml:"slack"`
+}
+
+// IRCConnection holds the connection and related data
+type IRCConnection struct {
+	conn   net.Conn
+	mutex  sync.Mutex
+	config *Config
+}
+
+// SlackEvent represents the structure of incoming Slack events
+type SlackEvent struct {
+	Type      string `json:"type"`
+	Challenge string `json:"challenge"`
+	Event     struct {
+		Type    string `json:"type"`
+		User    string `json:"user"`
+		Text    string `json:"text"`
+		Channel string `json:"channel"`
+		BotID   string `json:"bot_id,omitempty"`
+		Subtype string `json:"subtype,omitempty"`
+	} `json:"event"`
+}
+
+// SlackUserInfo represents user information from Slack API
+type SlackUserInfo struct {
+	Ok   bool `json:"ok"`
+	User struct {
+		Profile struct {
+			DisplayName string `json:"display_name"`
+			RealName    string `json:"real_name"`
+		} `json:"profile"`
+	} `json:"user"`
+}
+
+// UserCache holds user display names with expiration
+type UserCache struct {
+	displayName string
+	expiration  time.Time
+}
+
+var (
+	// Cache user info for 1 hour
+	userCache     = make(map[string]UserCache)
+	userCacheMux  sync.RWMutex
+	cacheDuration = 1 * time.Hour
+)
+
+func getUserDisplayName(userID string, config *Config) string {
+	// Check cache first
+	userCacheMux.RLock()
+	if cache, exists := userCache[userID]; exists && time.Now().Before(cache.expiration) {
+		userCacheMux.RUnlock()
+		return cache.displayName
+	}
+	userCacheMux.RUnlock()
+
+	// Fetch from Slack API
+	url := fmt.Sprintf("https://slack.com/api/users.info?user=%s", userID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+		return userID
+	}
+
+	req.Header.Add("Authorization", "Bearer "+config.Slack.APIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Error fetching user info: %v", err)
+		return userID
+	}
+	defer resp.Body.Close()
+
+	var userInfo SlackUserInfo
+	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+		log.Printf("Error decoding user info: %v", err)
+		return userID
+	}
+
+	if !userInfo.Ok {
+		log.Printf("Error from Slack API for user %s", userID)
+		return userID
+	}
+
+	// Use display name if set, otherwise use real name
+	displayName := userInfo.User.Profile.DisplayName
+	if displayName == "" {
+		displayName = userInfo.User.Profile.RealName
+	}
+	if displayName == "" {
+		displayName = userID
+	}
+
+	// Update cache
+	userCacheMux.Lock()
+	userCache[userID] = UserCache{
+		displayName: displayName,
+		expiration:  time.Now().Add(cacheDuration),
+	}
+	userCacheMux.Unlock()
+
+	return displayName
 }
 
 func main() {
-    config := loadConfig("config.yaml")
-    for {
-        err := connectAndListen(config)
-        if err != nil {
-            log.Printf("Error: %v", err)
-            log.Println("Reconnecting in 5 seconds...")
-            time.Sleep(5 * time.Second)
-        }
-    }
+	config := loadConfig("config.yaml")
+
+	// Create a channel to signal connection status
+	connectionReady := make(chan *IRCConnection)
+
+	// Start IRC connection management
+	go manageIRCConnection(config, connectionReady)
+
+	// Wait for initial connection
+	ircConn := <-connectionReady
+
+	// Start webhook listener
+	log.Printf("Starting Slack webhook listener on %s", config.Slack.ListenAddress)
+	http.HandleFunc("/webhook", createWebhookHandler(ircConn))
+	if err := http.ListenAndServe(config.Slack.ListenAddress, nil); err != nil {
+		log.Fatalf("Failed to start webhook listener: %v", err)
+	}
 }
 
-func connectAndListen(config *Config) error {
-    conn, err := net.Dial("tcp", config.IRC.Server)
-    if err != nil {
-        return fmt.Errorf("failed to connect to IRC server: %v", err)
-    }
-    defer conn.Close()
+func shouldProcessMessage(event *SlackEvent, config *Config) bool {
+	// Ignore messages with subtypes (like bot_message, message_changed, etc.)
+	if event.Event.Subtype != "" {
+		return false
+	}
 
-    // Sending IRC commands
-    fmt.Fprintf(conn, "NICK %s\r\n", config.IRC.Nickname)
-    fmt.Fprintf(conn, "USER %s 8 * :%s\r\n", config.IRC.Nickname, config.IRC.Nickname)
-    fmt.Fprintf(conn, "JOIN %s\r\n", config.IRC.Channel)
+	// Ignore bot messages if configured
+	if config.Slack.IgnoreBots && event.Event.BotID != "" {
+		return false
+	}
 
-    // Reading messages
-    reader := bufio.NewReader(conn)
-    for {
-        message, err := reader.ReadString('\n')
-        if err != nil {
-            return fmt.Errorf("error reading message: %v", err)
-        }
-        handleMessage(message, conn, config.Slack.WebhookURL)
-    }
+	// Check if user is in ignore list
+	for _, ignoredUser := range config.Slack.IgnoreUsers {
+		if event.Event.User == ignoredUser {
+			return false
+		}
+	}
+
+	return true
 }
 
-func handleMessage(message string, conn net.Conn, slackWebhookURL string) {
-    // Print message to console (for debugging)
-    fmt.Print(message)
+func createWebhookHandler(ircConn *IRCConnection) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
-    // Respond to PING messages to avoid being disconnected
-    if strings.HasPrefix(message, "PING") {
-        response := strings.Replace(message, "PING", "PONG", 1)
-        fmt.Fprintf(conn, response)
-        return
-    }
+		var event SlackEvent
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			log.Printf("Error decoding webhook payload: %v", err)
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
 
-    // Detect JOIN event
-    if strings.Contains(message, "JOIN") {
-        nickname := extractNickname(message)
-        formattedMessage := fmt.Sprintf("*%s has joined the channel*", nickname)
-        postToSlack(formattedMessage, slackWebhookURL)
-        return
-    }
+		// Handle URL verification challenge
+		if event.Type == "url_verification" {
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write([]byte(event.Challenge))
+			return
+		}
 
-    // Detect PART event
-    if strings.Contains(message, "PART") {
-        nickname := extractNickname(message)
-        formattedMessage := fmt.Sprintf("*%s has left the channel*", nickname)
-        postToSlack(formattedMessage, slackWebhookURL)
-        return
-    }
+		// Handle message events
+		if event.Type == "event_callback" && event.Event.Type == "message" {
+			// Check if we should process this message
+			if !shouldProcessMessage(&event, ircConn.config) {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 
-    // Detect ACTION (/me) event
-    if strings.Contains(message, "PRIVMSG") && strings.Contains(message, "ACTION") {
-        nickname := extractNickname(message)
-        actionMessage := extractActionMessage(message)
-        formattedMessage := fmt.Sprintf("_%s %s_", nickname, actionMessage)
-        postToSlack(formattedMessage, slackWebhookURL)
-        return
-    }
+			// Get user's display name
+			displayName := getUserDisplayName(event.Event.User, ircConn.config)
 
-    // Handle regular PRIVMSG (chat messages)
-    if strings.Contains(message, "PRIVMSG") {
-        nickname := extractNickname(message)
-        ircMessage := extractIRCMessage(message)
-        formattedMessage := fmt.Sprintf("<%s> %s", nickname, ircMessage)
-        postToSlack(formattedMessage, slackWebhookURL)
-    }
+			// Send message to IRC using the shared connection
+			ircMessage := fmt.Sprintf("PRIVMSG %s :[Slack] <%s> %s\r\n",
+				ircConn.config.IRC.Channel,
+				displayName,
+				event.Event.Text)
+
+			// Use mutex to ensure thread-safe writes to the connection
+			ircConn.mutex.Lock()
+			_, err := fmt.Fprintf(ircConn.conn, ircMessage)
+			ircConn.mutex.Unlock()
+
+			if err != nil {
+				log.Printf("Error sending message to IRC: %v", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Acknowledge receipt of the event
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}
+}
+
+func manageIRCConnection(config *Config, ready chan<- *IRCConnection) {
+	var ircConn *IRCConnection
+	firstConnection := true
+
+	for {
+		conn, err := net.Dial("tcp", config.IRC.Server)
+		if err != nil {
+			log.Printf("Failed to connect to IRC server: %v", err)
+			if firstConnection {
+				log.Fatalf("Failed to establish initial IRC connection")
+			}
+			continue
+		}
+
+		ircConn = &IRCConnection{
+			conn:   conn,
+			config: config,
+		}
+
+		// Send IRC authentication
+		fmt.Fprintf(conn, "NICK %s\r\n", config.IRC.Nickname)
+		fmt.Fprintf(conn, "USER %s 8 * :%s\r\n", config.IRC.Nickname, config.IRC.Nickname)
+		fmt.Fprintf(conn, "JOIN %s\r\n", config.IRC.Channel)
+
+		if firstConnection {
+			ready <- ircConn
+			firstConnection = false
+		}
+
+		// Handle incoming IRC messages
+		reader := bufio.NewReader(conn)
+		for {
+			message, err := reader.ReadString('\n')
+			if err != nil {
+				log.Printf("Error reading from IRC: %v", err)
+				break
+			}
+			handleMessage(message, ircConn, config.Slack.WebhookURL)
+		}
+
+		// If we get here, the connection was lost
+		log.Println("IRC connection lost, reconnecting...")
+	}
+}
+
+func handleMessage(message string, ircConn *IRCConnection, slackWebhookURL string) {
+	// Print message to console (for debugging)
+	fmt.Print(message)
+
+	// Respond to PING messages to avoid being disconnected
+	if strings.HasPrefix(message, "PING") {
+		response := strings.Replace(message, "PING", "PONG", 1)
+		ircConn.mutex.Lock()
+		fmt.Fprintf(ircConn.conn, response)
+		ircConn.mutex.Unlock()
+		return
+	}
+
+	// Detect JOIN event
+	if strings.Contains(message, "JOIN") {
+		nickname := extractNickname(message)
+		formattedMessage := fmt.Sprintf("*%s has joined the channel*", nickname)
+		postToSlack(formattedMessage, slackWebhookURL)
+		return
+	}
+
+	// Detect PART event
+	if strings.Contains(message, "PART") {
+		nickname := extractNickname(message)
+		formattedMessage := fmt.Sprintf("*%s has left the channel*", nickname)
+		postToSlack(formattedMessage, slackWebhookURL)
+		return
+	}
+
+	// Detect ACTION (/me) event
+	if strings.Contains(message, "PRIVMSG") && strings.Contains(message, "ACTION") {
+		nickname := extractNickname(message)
+		actionMessage := extractActionMessage(message)
+		formattedMessage := fmt.Sprintf("_%s %s_", nickname, actionMessage)
+		postToSlack(formattedMessage, slackWebhookURL)
+		return
+	}
+
+	// Handle regular PRIVMSG (chat messages)
+	if strings.Contains(message, "PRIVMSG") {
+		nickname := extractNickname(message)
+		ircMessage := extractIRCMessage(message)
+		formattedMessage := fmt.Sprintf("<%s> %s", nickname, ircMessage)
+		postToSlack(formattedMessage, slackWebhookURL)
+	}
 }
 
 // Extract the nickname from an IRC message
 func extractNickname(message string) string {
-    prefixEnd := strings.Index(message, "!")
-    if prefixEnd == -1 {
-        return ""
-    }
-    return message[1:prefixEnd]
+	prefixEnd := strings.Index(message, "!")
+	if prefixEnd == -1 {
+		return ""
+	}
+	return message[1:prefixEnd]
 }
 
 // Extract the regular IRC message
 func extractIRCMessage(message string) string {
-    messageParts := strings.SplitN(message, ":", 3)
-    if len(messageParts) > 2 {
-        return messageParts[2]
-    }
-    return ""
+	messageParts := strings.SplitN(message, ":", 3)
+	if len(messageParts) > 2 {
+		return messageParts[2]
+	}
+	return ""
 }
 
 // Extract the ACTION message (/me command)
 func extractActionMessage(message string) string {
-    start := strings.Index(message, "ACTION") + len("ACTION ")
-    end := strings.Index(message[start:], "")
-    if end == -1 {
-        return message[start:]
-    }
-    return message[start : start+end]
+	start := strings.Index(message, "ACTION") + len("ACTION ")
+	end := strings.Index(message[start:], "")
+	if end == -1 {
+		return message[start:]
+	}
+	return message[start : start+end]
 }
 
 func postToSlack(message, slackWebhookURL string) {
-    // Escape special characters in the message
-    escapedMessage := strings.ReplaceAll(message, `"`, `"`)
+	// Escape special characters in the message
+	escapedMessage := strings.ReplaceAll(message, `"`, `\"`)
 
-    // Prepare the payload for the Slack webhook
-    payload := fmt.Sprintf(`{"text": "%s"}`, escapedMessage)
-    fmt.Println("Payload:", payload) // Print the payload for debugging
+	// Prepare the payload for the Slack webhook
+	payload := fmt.Sprintf(`{"text": "%s"}`, escapedMessage)
+	fmt.Println("Payload:", payload) // Print the payload for debugging
 
-    resp, err := http.Post(slackWebhookURL, "application/json", strings.NewReader(payload))
-    if err != nil {
-        log.Printf("Error sending message to Slack: %v", err)
-        return
-    }
-    defer resp.Body.Close()
+	resp, err := http.Post(slackWebhookURL, "application/json", strings.NewReader(payload))
+	if err != nil {
+		log.Printf("Error sending message to Slack: %v", err)
+		return
+	}
+	defer resp.Body.Close()
 
-    if resp.StatusCode != http.StatusOK {
-        log.Printf("Received non-OK response from Slack: %s", resp.Status)
-    }
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Received non-OK response from Slack: %s", resp.Status)
+	}
 }
 
 func loadConfig(filename string) *Config {
-    config := &Config{}
-    data, err := ioutil.ReadFile(filename)
-    if err != nil {
-        log.Fatalf("Error reading config file: %v", err)
-    }
-    err = yaml.Unmarshal(data, config)
-    if err != nil {
-        log.Fatalf("Error parsing config file: %v", err)
-    }
-    return config
+	config := &Config{}
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		log.Fatalf("Error reading config file: %v", err)
+	}
+	err = yaml.Unmarshal(data, config)
+	if err != nil {
+		log.Fatalf("Error parsing config file: %v", err)
+	}
+	return config
 }
