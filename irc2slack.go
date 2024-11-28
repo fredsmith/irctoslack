@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -74,7 +75,21 @@ var (
 	userCache     = make(map[string]UserCache)
 	userCacheMux  sync.RWMutex
 	cacheDuration = 1 * time.Hour
+	// Regex for finding user mentions in Slack messages
+	mentionRegex = regexp.MustCompile(`<@(U[A-Z0-9]+)>`)
 )
+
+func translateMentions(text string, config *Config) string {
+	return mentionRegex.ReplaceAllStringFunc(text, func(mention string) string {
+		matches := mentionRegex.FindStringSubmatch(mention)
+		if len(matches) < 2 {
+			return mention
+		}
+		userID := matches[1]
+		displayName := getUserDisplayName(userID, config)
+		return "@" + displayName
+	})
+}
 
 func getUserDisplayName(userID string, config *Config) string {
 	// Check cache first
@@ -205,11 +220,14 @@ func createWebhookHandler(ircConn *IRCConnection) http.HandlerFunc {
 			// Get user's display name
 			displayName := getUserDisplayName(event.Event.User, ircConn.config)
 
+			// Translate any @mentions in the message
+			translatedText := translateMentions(event.Event.Text, ircConn.config)
+
 			// Send message to IRC using the shared connection
 			ircMessage := fmt.Sprintf("PRIVMSG %s :[Slack] <%s> %s\r\n",
 				ircConn.config.IRC.Channel,
 				displayName,
-				event.Event.Text)
+				translatedText)
 
 			// Use mutex to ensure thread-safe writes to the connection
 			ircConn.mutex.Lock()

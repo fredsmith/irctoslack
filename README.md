@@ -7,6 +7,7 @@ A bidirectional bridge between IRC and Slack channels, allowing seamless communi
 - Bidirectional message relay between IRC and Slack
 - Proper handling of IRC actions (/me) and join/part messages
 - User display name support for Slack messages
+- Translation of Slack @mentions to readable usernames
 - Bot message filtering to prevent loops
 - Efficient user information caching
 - Automatic reconnection for IRC
@@ -108,6 +109,26 @@ A bidirectional bridge between IRC and Slack channels, allowing seamless communi
    sudo systemctl start irctoslack
    ```
 
+## Message Translation
+
+The bridge handles several types of message translations:
+
+1. User Display Names:
+   - Slack user IDs are automatically translated to display names
+   - Display names are cached for 1 hour to minimize API calls
+   - Falls back to real name if display name is empty
+   - Falls back to user ID if both are empty
+
+2. @mentions:
+   - Slack @mentions (e.g., <@U1234ABCD>) are automatically translated to readable usernames
+   - Uses the same caching mechanism as display names
+   - Appears as @username in IRC
+
+3. Special Messages:
+   - IRC /me actions are formatted with italics in Slack
+   - Join/Part messages are formatted with asterisks in Slack
+   - Bot messages can be filtered to prevent loops
+
 ## Firewall Configuration
 
 Ensure your server's firewall allows:
@@ -140,6 +161,12 @@ Monitor the application logs:
 3. User names showing as IDs:
    - Verify the API token has proper user read permissions
    - Check logs for API rate limiting messages
+   - Ensure the cache isn't being cleared unexpectedly
+
+4. @mentions not translating:
+   - Check logs for any API errors
+   - Verify the mentioned users exist in the workspace
+   - Ensure the bot has access to user information
 
 ## Security Considerations
 
