@@ -224,7 +224,7 @@ func createWebhookHandler(ircConn *IRCConnection) http.HandlerFunc {
 			translatedText := translateMentions(event.Event.Text, ircConn.config)
 
 			// Send message to IRC using the shared connection
-			ircMessage := fmt.Sprintf("PRIVMSG %s :[Slack] <%s> %s\r\n",
+			ircMessage := fmt.Sprintf("PRIVMSG %s :<%s> %s\r\n",
 				ircConn.config.IRC.Channel,
 				displayName,
 				translatedText)
