@@ -350,32 +350,41 @@ func extractNickname(message string) string {
 
 // Extract the regular IRC message
 func extractIRCMessage(message string) string {
-	messageParts := strings.SplitN(message, ":", 3)
-	if len(messageParts) > 2 {
-		return messageParts[2]
+	// Find the PRIVMSG command, then extract the trailing message after " :"
+	// This avoids splitting on colons in IPv6 addresses
+	idx := strings.Index(message, " PRIVMSG ")
+	if idx == -1 {
+		return ""
 	}
-	return ""
+	rest := message[idx+len(" PRIVMSG "):]
+	colonIdx := strings.Index(rest, " :")
+	if colonIdx == -1 {
+		return ""
+	}
+	return strings.TrimRight(rest[colonIdx+2:], "\r\n")
 }
 
 // Extract the ACTION message (/me command)
 func extractActionMessage(message string) string {
 	start := strings.Index(message, "ACTION") + len("ACTION ")
-	end := strings.Index(message[start:], "")
+	end := strings.Index(message[start:], "\x01")
 	if end == -1 {
-		return message[start:]
+		return strings.TrimRight(message[start:], "\r\n")
 	}
 	return message[start : start+end]
 }
 
 func postToSlack(message, slackWebhookURL string) {
-	// Escape special characters in the message
-	escapedMessage := strings.ReplaceAll(message, `"`, `\"`)
+	// Use json.Marshal for proper encoding of emoji, newlines, etc.
+	payload := map[string]string{"text": message}
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Error encoding message to JSON: %v", err)
+		return
+	}
+	fmt.Println("Payload:", string(jsonData)) // Print the payload for debugging
 
-	// Prepare the payload for the Slack webhook
-	payload := fmt.Sprintf(`{"text": "%s"}`, escapedMessage)
-	fmt.Println("Payload:", payload) // Print the payload for debugging
-
-	resp, err := http.Post(slackWebhookURL, "application/json", strings.NewReader(payload))
+	resp, err := http.Post(slackWebhookURL, "application/json", strings.NewReader(string(jsonData)))
 	if err != nil {
 		log.Printf("Error sending message to Slack: %v", err)
 		return
