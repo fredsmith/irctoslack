@@ -21,16 +21,25 @@ A bidirectional bridge between IRC and Slack channels, allowing seamless communi
 
 ## Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/fredsmith/irctoslack.git
-   cd irctoslack
-   ```
+### Download the latest release
 
-2. Build the application:
-   ```bash
-   go build
-   ```
+```bash
+# Linux amd64
+curl -Lo irctoslack https://github.com/fredsmith/irctoslack/releases/latest/download/irctoslack-linux-amd64
+chmod +x irctoslack
+
+# Linux arm64
+curl -Lo irctoslack https://github.com/fredsmith/irctoslack/releases/latest/download/irctoslack-linux-arm64
+chmod +x irctoslack
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/fredsmith/irctoslack.git
+cd irctoslack
+go build
+```
 
 ## Slack Configuration
 
@@ -58,22 +67,14 @@ A bidirectional bridge between IRC and Slack channels, allowing seamless communi
 
 ## Application Configuration
 
-1. Create or modify `config.yaml`:
-   ```yaml
-   irc:
-     server: "irc.oftc.net:6667"  # Your IRC server
-     channel: "#yourchannel"       # Your IRC channel
-     nickname: "slackbridge"       # Bot's nickname on IRC
-
-   slack:
-     webhook_url: "https://hooks.slack.com/services/..."  # Your Slack webhook URL
-     listen_address: ":3000"       # Local address to listen for Slack events
-     api_token: "xoxb-..."        # Your Bot User OAuth Token
-     ignore_bots: true            # Ignore bot messages to prevent loops
-     ignore_users: []             # List of Slack user IDs to ignore
+1. Generate a sample configuration file:
+   ```bash
+   ./irctoslack --generate-config > config.yaml
    ```
 
-2. Set proper permissions:
+2. Edit `config.yaml` with your IRC and Slack settings.
+
+3. Set proper permissions:
    ```bash
    chmod 600 config.yaml  # Protect the config file containing sensitive tokens
    ```
@@ -85,7 +86,14 @@ A bidirectional bridge between IRC and Slack channels, allowing seamless communi
    ./irctoslack
    ```
 
-2. For production use, consider using a process manager like systemd. Create `/etc/systemd/system/irctoslack.service`:
+2. Run in the background (logs to `irc2slack.log`):
+   ```bash
+   ./irctoslack -d
+   ```
+
+3. Running without a `config.yaml` prints a help screen with available options.
+
+4. For production use, consider using a process manager like systemd. Create `/etc/systemd/system/irctoslack.service`:
    ```ini
    [Unit]
    Description=IRC to Slack bridge
@@ -103,7 +111,7 @@ A bidirectional bridge between IRC and Slack channels, allowing seamless communi
    WantedBy=multi-user.target
    ```
 
-3. Enable and start the service:
+5. Enable and start the service:
    ```bash
    sudo systemctl enable irctoslack
    sudo systemctl start irctoslack
@@ -144,29 +152,8 @@ sudo ufw allow 3000/tcp
 
 Monitor the application logs:
 - If running directly: Output goes to stdout/stderr
+- If running with `-d`: `tail -f irc2slack.log`
 - If using systemd: `sudo journalctl -u irctoslack -f`
-
-## Troubleshooting
-
-1. Webhook URL not working:
-   - Verify the server is accessible from the internet
-   - Check firewall rules
-   - Ensure the correct port is configured
-
-2. Messages not appearing:
-   - Check IRC connection status in logs
-   - Verify Slack token permissions
-   - Ensure bot is invited to the Slack channel
-
-3. User names showing as IDs:
-   - Verify the API token has proper user read permissions
-   - Check logs for API rate limiting messages
-   - Ensure the cache isn't being cleared unexpectedly
-
-4. @mentions not translating:
-   - Check logs for any API errors
-   - Verify the mentioned users exist in the workspace
-   - Ensure the bot has access to user information
 
 ## Security Considerations
 

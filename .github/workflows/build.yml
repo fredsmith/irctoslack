@@ -33,3 +33,38 @@ jobs:
         with:
           name: irctoslack-${{ matrix.goos }}-${{ matrix.goarch }}
           path: irctoslack-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate CalVer tag
+        id: calver
+        run: |
+          BASE_TAG=$(date -u +%Y.%m.%d)
+          COUNTER=0
+          TAG=$BASE_TAG
+          while git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; do
+            COUNTER=$((COUNTER + 1))
+            TAG="${BASE_TAG}.${COUNTER}"
+          done
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.calver.outputs.tag }}" \
+            --title "${{ steps.calver.outputs.tag }}" \
+            --generate-notes \
+            irctoslack-linux-amd64/irctoslack-linux-amd64 \
+            irctoslack-linux-arm64/irctoslack-linux-arm64

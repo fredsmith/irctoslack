@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -148,6 +151,25 @@ func getUserDisplayName(userID string, config *Config) string {
 }
 
 func main() {
+	generateConfig := flag.Bool("generate-config", false, "Generate a sample config.yaml with instructions")
+	daemonize := flag.Bool("d", false, "Run in the background, logging to irc2slack.log")
+	flag.Parse()
+
+	if *generateConfig {
+		printSampleConfig()
+		return
+	}
+
+	if _, err := os.Stat("config.yaml"); os.IsNotExist(err) {
+		printUsage()
+		os.Exit(1)
+	}
+
+	if *daemonize {
+		daemonizeProcess()
+		return
+	}
+
 	config := loadConfig("config.yaml")
 
 	// Create a channel to signal connection status
@@ -165,6 +187,77 @@ func main() {
 	if err := http.ListenAndServe(config.Slack.ListenAddress, nil); err != nil {
 		log.Fatalf("Failed to start webhook listener: %v", err)
 	}
+}
+
+func printUsage() {
+	fmt.Println(`irctoslack - Bidirectional IRC to Slack bridge
+
+Usage: irctoslack [options]
+
+Options:
+  --generate-config  Generate a sample config.yaml with instructions
+  -d                 Run in the background, logging to irc2slack.log
+
+irctoslack requires a config.yaml file in the current directory.
+Run with --generate-config to create one.`)
+}
+
+func printSampleConfig() {
+	fmt.Println(`# irctoslack configuration
+
+# IRC settings
+irc:
+  # IRC server address and port
+  server: "irc.oftc.net:6667"
+  # Channel to join (include the #)
+  channel: "#yourchannel"
+  # Nickname for the bot on IRC
+  nickname: "slackbridge"
+
+# Slack settings
+slack:
+  # Incoming webhook URL for posting messages to Slack
+  # Create one at https://api.slack.com/apps -> Incoming Webhooks
+  webhook_url: "https://hooks.slack.com/services/T.../B.../..."
+  # Address to listen on for Slack event webhooks
+  listen_address: ":3000"
+  # Bot User OAuth Token (starts with xoxb-)
+  # Required scopes: users:read, users:read.email
+  api_token: "xoxb-..."
+  # Ignore messages from bots (recommended to prevent loops)
+  ignore_bots: true
+  # List of Slack user IDs to ignore
+  ignore_users: []`)
+}
+
+func daemonizeProcess() {
+	executable, err := os.Executable()
+	if err != nil {
+		log.Fatalf("Failed to get executable path: %v", err)
+	}
+
+	// Rebuild args without -d
+	var args []string
+	for _, arg := range os.Args[1:] {
+		if arg != "-d" {
+			args = append(args, arg)
+		}
+	}
+
+	logFile, err := os.OpenFile("irc2slack.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+
+	cmd := exec.Command(executable, args...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("Failed to start background process: %v", err)
+	}
+
+	fmt.Printf("irctoslack started in background (PID %d), logging to irc2slack.log\n", cmd.Process.Pid)
 }
 
 func shouldProcessMessage(event *SlackEvent, config *Config) bool {
